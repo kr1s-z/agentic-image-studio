@@ -1,0 +1,21 @@
+frontend:
+  image:
+    repository: agentic-image-studio-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+  host: app.lvh.me
+
+backend:
+  image:
+    repository: agentic-image-studio-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 3000
+  host: backend.lvh.me
+
+ingress:
+  enabled: true
+  className: nginx

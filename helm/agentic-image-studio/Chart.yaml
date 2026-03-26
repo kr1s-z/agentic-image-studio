@@ -1,0 +1,5 @@
+apiVersion: v2
+name: agentic-image-studio
+description: Helm chart for Agentic Image Studio
+version: 0.1.0
+appVersion: "0.1.0"
