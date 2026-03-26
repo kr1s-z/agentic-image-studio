@@ -185,11 +185,13 @@ export async function runWorkflow(jobId: string): Promise<void> {
 
         if (mode === "simulation") await delay(1500 + Math.random() * 1000);
 
+        const referenceImages = job.images.slice(1).map((img) => img.buffer);
         try {
           job.currentImage = await executePlanStep(
             job.currentImage,
             planStep,
             job.model,
+            referenceImages,
           );
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);

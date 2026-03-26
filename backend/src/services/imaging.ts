@@ -3,6 +3,7 @@ import axios from "axios";
 import path from "path";
 import fs from "fs";
 import type { PlanStep } from "../types";
+import { modelRegistry } from "../models";
 
 const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 const UPLOADS_DIR = path.join(__dirname, "../../uploads");
@@ -102,43 +103,15 @@ export async function applySharpOperation(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Replicate — model-aware img-to-img                                 */
+/*  Replicate — delegates to model adapters via registry               */
 /* ------------------------------------------------------------------ */
 
-function buildReplicateInput(
-  model: string,
-  b64: string,
-  prompt: string,
-  strength: number,
-): Record<string, unknown> {
-  const imageData = `data:image/jpeg;base64,${b64}`;
-
-  if (model.includes("flux")) {
-    return {
-      prompt,
-      image: imageData,
-      prompt_strength: strength,
-      num_outputs: 1,
-      output_format: "jpg",
-    };
-  }
-
-  if (model.includes("sdxl") || model.includes("stability")) {
-    return {
-      image: imageData,
-      prompt,
-      prompt_strength: strength,
-      num_inference_steps: 30,
-      guidance_scale: 7.5,
-    };
-  }
-
-  return {
-    image: imageData,
-    prompt,
-    strength,
-    prompt_strength: strength,
-  };
+async function bufToDataUrl(buf: Buffer): Promise<string> {
+  const resized = await sharp(buf)
+    .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+  return `data:image/jpeg;base64,${resized.toString("base64")}`;
 }
 
 export async function replicateTransform(
@@ -146,22 +119,27 @@ export async function replicateTransform(
   prompt: string,
   strength: number = 0.7,
   model: string = "stability-ai/sdxl",
+  referenceImages: Buffer[] = [],
 ): Promise<Buffer> {
   if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
 
-  const resized = await sharp(buf)
-    .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 85 })
-    .toBuffer();
+  const adapter = modelRegistry.get(model);
 
-  const b64 = resized.toString("base64");
-  const input = buildReplicateInput(model, b64, prompt, strength);
+  const primaryDataUrl = await bufToDataUrl(buf);
+  const refDataUrls = await Promise.all(referenceImages.map(bufToDataUrl));
 
-  log(`Calling Replicate model=${model} (prompt: "${prompt.slice(0, 60)}…")`);
+  const input = adapter.buildInput({
+    prompt,
+    primaryImageDataUrl: primaryDataUrl,
+    referenceImageDataUrls: refDataUrls,
+    strength,
+  });
+
+  log(`Calling Replicate model=${adapter.id} (${adapter.name}) — prompt: "${prompt.slice(0, 60)}…"`);
 
   const { data: prediction } = await axios.post(
     "https://api.replicate.com/v1/predictions",
-    { model, input },
+    { model: adapter.id, input },
     {
       headers: {
         Authorization: `Bearer ${REPLICATE_TOKEN}`,
@@ -190,9 +168,7 @@ export async function replicateTransform(
 
   if (!result.output) throw new Error("Replicate prediction timed out");
 
-  const imgUrl = Array.isArray(result.output)
-    ? result.output[0]
-    : result.output;
+  const imgUrl = adapter.extractOutputUrl(result.output);
   const { data: imgData } = await axios.get(imgUrl, {
     responseType: "arraybuffer",
     timeout: 30_000,
@@ -208,6 +184,7 @@ export async function executePlanStep(
   buf: Buffer,
   planStep: PlanStep,
   model: string,
+  referenceImages: Buffer[] = [],
 ): Promise<Buffer> {
   if (planStep.tool === "replicate" && isReplicateAvailable()) {
     try {
@@ -216,6 +193,7 @@ export async function executePlanStep(
         (planStep.parameters.prompt as string) || planStep.description,
         (planStep.parameters.strength as number) ?? 0.7,
         model,
+        referenceImages,
       );
     } catch (err) {
       log(

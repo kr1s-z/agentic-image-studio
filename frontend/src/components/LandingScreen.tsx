@@ -14,9 +14,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const MODELS = [
   { id: "black-forest-labs/flux-1.1-pro", name: "Flux 1.1 Pro" },
   { id: "black-forest-labs/flux-schnell", name: "Flux Schnell" },
-  { id: "stability-ai/sdxl", name: "Stable Diffusion XL" },
-  { id: "bytedance/sdxl-lightning-4step", name: "SDXL Lightning" },
-  { id: "fofr/face-to-sticker", name: "Face to Sticker" },
+  { id: "google/nano-banana-2", name: "Nano Banana 2" },
 ];
 
 const EXAMPLES = [
