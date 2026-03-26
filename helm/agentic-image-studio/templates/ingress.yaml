@@ -5,6 +5,8 @@ metadata:
   name: {{ include "app.fullname" . }}-ingress
   labels:
     {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:

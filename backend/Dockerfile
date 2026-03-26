@@ -1,22 +1,26 @@
-FROM node:20-alpine AS base
-
+FROM node:22-alpine AS base
 WORKDIR /app
 COPY package.json package-lock.json* ./
 
-# --- dev target: nodemon with hot reload ---
-FROM base AS dev
-
+# --- build target: compile TypeScript ---
+FROM base AS builder
 RUN npm ci
-COPY . .
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN npx tsc
 
+# --- dev target: tsx with hot reload ---
+FROM base AS dev
+RUN npm ci
+COPY tsconfig.json ./
+COPY src/ ./src/
 EXPOSE 3000
-CMD ["npx", "nodemon", "index.js"]
+CMD ["npx", "tsx", "watch", "src/index.ts"]
 
 # --- production target ---
 FROM base AS production
-
 RUN npm ci --omit=dev
-COPY . .
-
+COPY --from=builder /app/dist ./dist
+RUN mkdir -p uploads
 EXPOSE 3000
-CMD ["node", "index.js"]
+CMD ["node", "dist/index.js"]
