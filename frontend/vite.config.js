@@ -6,9 +6,10 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5173,
+    allowedHosts: ["app.lvh.me"],
     proxy: {
       "/api": {
-        target: "http://backend.lvh.me",
+        target: process.env.VITE_API_TARGET || "http://backend:3000",
         changeOrigin: true,
       },
     },
