@@ -10,6 +10,8 @@ export interface ModelAdapter {
   readonly id: string;
   /** Human-readable name shown in logs and traces */
   readonly name: string;
+  /** Whether this model accepts multiple reference images */
+  readonly supportsReferenceImages?: boolean;
 
   /** Build the model-specific `input` payload for the Replicate prediction API */
   buildInput(params: ModelInputParams): Record<string, unknown>;

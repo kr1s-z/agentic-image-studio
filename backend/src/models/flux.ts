@@ -3,6 +3,7 @@ import type { ModelAdapter, ModelInputParams } from "./types";
 export class FluxProAdapter implements ModelAdapter {
   readonly id = "black-forest-labs/flux-1.1-pro";
   readonly name = "Flux 1.1 Pro";
+  readonly supportsReferenceImages = false;
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
     const input: Record<string, unknown> = {
@@ -30,6 +31,7 @@ export class FluxProAdapter implements ModelAdapter {
 export class FluxSchnellAdapter implements ModelAdapter {
   readonly id = "black-forest-labs/flux-schnell";
   readonly name = "Flux Schnell";
+  readonly supportsReferenceImages = false;
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
     return {

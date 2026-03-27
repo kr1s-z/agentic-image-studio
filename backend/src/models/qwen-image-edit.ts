@@ -1,22 +1,19 @@
 import type { ModelAdapter, ModelInputParams } from "./types";
 
-export class NanoBanana2Adapter implements ModelAdapter {
-  readonly id = "google/nano-banana-2";
-  readonly name = "Nano Banana 2";
+export class QwenImageEdit2511Adapter implements ModelAdapter {
+  readonly id = "qwen/qwen-image-edit-2511";
+  readonly name = "Qwen Image Edit 2511";
   readonly supportsReferenceImages = true;
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
-    const imageInput = [
-      params.primaryImageUrl,
-      ...params.referenceImageUrls,
-    ];
-
+    const images = [params.primaryImageUrl, ...params.referenceImageUrls];
     return {
       prompt: params.prompt,
-      image_input: imageInput,
-      resolution: "1K",
+      image: images,
       aspect_ratio: "match_input_image",
       output_format: "jpg",
+      output_quality: 95,
+      go_fast: true,
     };
   }
 

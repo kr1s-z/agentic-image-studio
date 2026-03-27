@@ -177,10 +177,16 @@ export async function replicateTransform(
     );
   }
 
-  log(`Uploading ${1 + referenceImages.length} image(s) to Replicate files API…`);
+  const useRefs = !!adapter.supportsReferenceImages;
+  const refsToUpload = useRefs ? referenceImages : [];
+  if (!useRefs && referenceImages.length > 0) {
+    log(`Model ${adapter.id} supports a single image input; ignoring ${referenceImages.length} reference image(s)`);
+  }
+
+  log(`Uploading ${1 + refsToUpload.length} image(s) to Replicate files API…`);
   const primaryUrl = await uploadToReplicate(buf, token);
   const refUrls = await Promise.all(
-    referenceImages.map((img) => uploadToReplicate(img, token)),
+    refsToUpload.map((img) => uploadToReplicate(img, token)),
   );
 
   const input = adapter.buildInput({
