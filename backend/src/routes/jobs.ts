@@ -5,7 +5,12 @@ import sharp from "sharp";
 import { getJob, setJob } from "../store";
 import { runWorkflow } from "../services/workflow";
 import type { Job, ImageEntry } from "../types";
-import { startJobTrace, cancelJobTrace } from "../services/observability";
+import {
+  startJobTrace,
+  cancelJobTrace,
+  scoreJobTrace,
+  attachOriginalImageToTrace,
+} from "../services/observability";
 
 const router = Router();
 
@@ -68,6 +73,9 @@ router.post("/jobs", upload.array("images", 10), async (req, res) => {
     imageCount: images.length,
     maxIterations: job.maxIterations,
   });
+  images.forEach((img, i) =>
+    attachOriginalImageToTrace(jobId, img.buffer, img.mime, i),
+  );
   console.log(
     `[api] Job created: ${jobId} — model: ${job.model} — ${images.length} image(s) — goal: "${goal.slice(0, 80)}"`,
   );
@@ -112,6 +120,25 @@ router.post("/jobs/:jobId/cancel", (req, res) => {
   broadcastStatus(job.id, "cancelled", "Job cancelled by user");
 
   res.json({ status: "cancelled" });
+});
+
+router.post("/jobs/:jobId/feedback", (req, res) => {
+  const job = getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "Job not found" });
+
+  const { score, comment } = req.body as {
+    score?: number;
+    comment?: string;
+  };
+
+  if (score !== 1 && score !== -1) {
+    return res
+      .status(400)
+      .json({ error: "score must be 1 (thumbs up) or -1 (thumbs down)" });
+  }
+
+  scoreJobTrace(job.id, score === 1 ? 1 : 0, comment?.trim() || undefined);
+  res.json({ ok: true });
 });
 
 router.get("/jobs/:jobId/download", async (req, res) => {

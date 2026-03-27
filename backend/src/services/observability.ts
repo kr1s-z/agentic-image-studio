@@ -4,6 +4,7 @@ import {
   type LangfuseSpanClient,
   type LangfuseGenerationClient,
 } from "langfuse";
+import crypto from "crypto";
 
 type SpanHandle = {
   end: (output?: unknown) => void;
@@ -66,6 +67,55 @@ function safeFlush(): void {
   void lf.flushAsync().catch(() => {});
 }
 
+async function uploadTraceImage(args: {
+  jobId: string;
+  field: "input" | "output" | "metadata";
+  contentType: string;
+  buffer: Buffer;
+  label: string;
+}): Promise<void> {
+  const lf = getClient();
+  if (!lf) return;
+
+  const contentType = args.contentType || "image/jpeg";
+  const startedAt = Date.now();
+  const sha256Hash = crypto.createHash("sha256").update(args.buffer).digest("hex");
+
+  const { mediaId, uploadUrl } = await lf.api.mediaGetUploadUrl({
+    traceId: args.jobId,
+    field: args.field,
+    contentType: contentType as any,
+    contentLength: args.buffer.length,
+    sha256Hash,
+  });
+
+  if (uploadUrl) {
+    const uploadRes = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      body: args.buffer,
+    });
+    await lf.api.mediaPatch(mediaId, {
+      uploadedAt: new Date().toISOString(),
+      uploadHttpStatus: uploadRes.status,
+      uploadHttpError: uploadRes.ok ? undefined : uploadRes.statusText,
+      uploadTimeMs: Date.now() - startedAt,
+    });
+    if (!uploadRes.ok) {
+      throw new Error(`Langfuse media upload failed (${uploadRes.status}): ${uploadRes.statusText}`);
+    }
+  }
+
+  const trace = getOrCreateTrace(args.jobId);
+  if (!trace) return;
+  trace.update({
+    metadata: {
+      [`${args.label}MediaId`]: mediaId,
+    },
+  });
+  safeFlush();
+}
+
 export function isObservabilityEnabled(): boolean {
   return LANGFUSE_ENABLED;
 }
@@ -86,6 +136,39 @@ export function startJobTrace(args: {
     tags: ["agentic-image-studio", args.model],
   });
   safeFlush();
+}
+
+export function attachOriginalImageToTrace(
+  jobId: string,
+  buffer: Buffer,
+  contentType: string,
+  index: number,
+): void {
+  void uploadTraceImage({
+    jobId,
+    field: "input",
+    contentType,
+    buffer,
+    label: `original_${index}`,
+  }).catch((err) => {
+    log(`Failed to upload original image ${index} to Langfuse: ${safeError(err)}`);
+  });
+}
+
+export function attachFinalImageToTrace(
+  jobId: string,
+  buffer: Buffer,
+  contentType: string,
+): void {
+  void uploadTraceImage({
+    jobId,
+    field: "output",
+    contentType,
+    buffer,
+    label: "final",
+  }).catch((err) => {
+    log(`Failed to upload final image to Langfuse: ${safeError(err)}`);
+  });
 }
 
 export function completeJobTrace(jobId: string, output: Record<string, unknown>): void {
@@ -109,6 +192,28 @@ export function cancelJobTrace(jobId: string): void {
   const trace = getOrCreateTrace(jobId);
   if (!trace) return;
   trace.update({ metadata: { status: "cancelled" } });
+  safeFlush();
+}
+
+export function scoreJobTrace(
+  jobId: string,
+  score: 0 | 1,
+  comment?: string,
+): void {
+  const trace = getOrCreateTrace(jobId);
+  if (!trace) return;
+  trace.score({
+    name: "user_feedback",
+    value: score,
+    dataType: "BOOLEAN",
+    comment,
+  } as any);
+  trace.update({
+    metadata: {
+      userFeedback: score === 1 ? "thumbs_up" : "thumbs_down",
+      userFeedbackComment: comment || null,
+    },
+  });
   safeFlush();
 }
 

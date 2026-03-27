@@ -9,6 +9,8 @@ import {
   ArrowLeft,
   CheckCircle2,
   AlertTriangle,
+  ThumbsUp,
+  ThumbsDown,
 } from "lucide-react";
 import type { WSMessage, JobStatus } from "../types";
 import { useWebSocket } from "../hooks/useWebSocket";
@@ -59,6 +61,10 @@ export default function JobDashboard({
   const originalImage = originalImages[0] ?? "";
   const { connected, trace, connect, disconnect } = useWebSocket(jobId);
   const [elapsed, setElapsed] = useState(0);
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+  const [showDownModal, setShowDownModal] = useState(false);
+  const [downComment, setDownComment] = useState("");
+  const [sendingFeedback, setSendingFeedback] = useState(false);
 
   const currentStatus = useMemo<JobStatus>(() => {
     for (let i = trace.length - 1; i >= 0; i--) {
@@ -142,6 +148,33 @@ export default function JobDashboard({
     disconnect();
     onReset();
   }, [disconnect, onReset]);
+
+  const sendFeedback = useCallback(
+    async (score: 1 | -1, comment?: string) => {
+      if (sendingFeedback || feedback) return;
+      setSendingFeedback(true);
+      try {
+        await fetch(`${API_BASE}/jobs/${jobId}/feedback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ score, comment }),
+        });
+        setFeedback(score === 1 ? "up" : "down");
+      } finally {
+        setSendingFeedback(false);
+      }
+    },
+    [feedback, jobId, sendingFeedback],
+  );
+
+  const handleThumbsUp = useCallback(() => {
+    void sendFeedback(1);
+  }, [sendFeedback]);
+
+  const handleThumbsDownSubmit = useCallback(() => {
+    void sendFeedback(-1, downComment.trim() || undefined);
+    setShowDownModal(false);
+  }, [downComment, sendFeedback]);
 
   return (
     <div className="h-screen flex flex-col">
@@ -352,6 +385,41 @@ export default function JobDashboard({
                   Start New Job
                 </button>
               </div>
+
+              <div className="pt-2 border-t border-zinc-800">
+                <p className="text-xs text-zinc-500 mb-2">Rate this result</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleThumbsUp}
+                    disabled={!!feedback || sendingFeedback}
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                      feedback === "up"
+                        ? "border-green-500/40 bg-green-500/10 text-green-300"
+                        : "border-zinc-700 bg-zinc-800/50 text-zinc-300 hover:text-white disabled:opacity-50"
+                    }`}
+                  >
+                    <ThumbsUp size={12} />
+                    Helpful
+                  </button>
+                  <button
+                    onClick={() => setShowDownModal(true)}
+                    disabled={!!feedback || sendingFeedback}
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                      feedback === "down"
+                        ? "border-red-500/40 bg-red-500/10 text-red-300"
+                        : "border-zinc-700 bg-zinc-800/50 text-zinc-300 hover:text-white disabled:opacity-50"
+                    }`}
+                  >
+                    <ThumbsDown size={12} />
+                    Needs work
+                  </button>
+                  {feedback && (
+                    <span className="text-xs text-zinc-500">
+                      Thanks for your feedback.
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -376,6 +444,37 @@ export default function JobDashboard({
           )}
         </div>
       </div>
+
+      {showDownModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-4 space-y-3">
+            <h4 className="text-sm font-semibold text-zinc-200">
+              Tell us what needs improvement
+            </h4>
+            <textarea
+              value={downComment}
+              onChange={(e) => setDownComment(e.target.value)}
+              rows={4}
+              placeholder="What was wrong with the result?"
+              className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 outline-none"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setShowDownModal(false)}
+                className="text-xs px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800/50 text-zinc-300 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleThumbsDownSubmit}
+                className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white"
+              >
+                Submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

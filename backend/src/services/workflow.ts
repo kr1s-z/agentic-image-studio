@@ -1,7 +1,12 @@
 import { getJob } from "../store";
 import { analyzeImage, createPlan, critique } from "./llm";
 import { executePlanStep, saveImage, isReplicateAvailable } from "./imaging";
-import { startSpan, completeJobTrace, failJobTrace } from "./observability";
+import {
+  startSpan,
+  completeJobTrace,
+  failJobTrace,
+  attachFinalImageToTrace,
+} from "./observability";
 import {
   broadcastStep,
   broadcastStatus,
@@ -217,6 +222,7 @@ export async function runWorkflow(jobId: string): Promise<void> {
     if (job.cancelled) return;
 
     const finalUrl = await saveImage(jobId, job.currentImage, "final");
+    attachFinalImageToTrace(jobId, job.currentImage, job.currentMime);
     job.status = "completed";
     job.completedAt = new Date().toISOString();
 
