@@ -46,7 +46,11 @@ env = parse_dotenv(".env")
 
 ENV_TO_HELM = {
     "REPLICATE_API_TOKEN": "backend.env.replicateApiToken",
+    "LANGFUSE_PUBLIC_KEY": "backend.env.langfusePublicKey",
+    "LANGFUSE_SECRET_KEY": "backend.env.langfuseSecretKey",
+    "LANGFUSE_BASE_URL": "backend.env.extra.LANGFUSE_BASE_URL",
     "LLM_MODEL":           "backend.env.extra.LLM_MODEL",
+    "LLM_MIN_REQUEST_GAP_MS": "backend.env.extra.LLM_MIN_REQUEST_GAP_MS",
     "MAX_ITERATIONS":      "backend.env.extra.MAX_ITERATIONS",
 }
 

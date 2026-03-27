@@ -26,10 +26,14 @@ backend:
 
     # Sensitive values -> Secret stringData.
     replicateApiToken: ""
+    langfusePublicKey: ""
+    langfuseSecretKey: ""
 
     # Non-secret env vars (plain key/value on the Deployment).
     extra:
+      LANGFUSE_BASE_URL: ""
       LLM_MODEL: ""
+      LLM_MIN_REQUEST_GAP_MS: ""
       MAX_ITERATIONS: ""
 
 ingress:

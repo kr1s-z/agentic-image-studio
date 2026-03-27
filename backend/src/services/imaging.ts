@@ -6,6 +6,7 @@ import FormData from "form-data";
 import type { PlanStep } from "../types";
 import { modelRegistry } from "../models";
 import { isReplicateConfigured, resolveReplicateToken } from "../config/env";
+import { startGeneration } from "./observability";
 
 const UPLOADS_DIR = path.join(__dirname, "../../uploads");
 const MAX_RETRIES = 5;
@@ -168,6 +169,7 @@ export async function replicateTransform(
   strength: number = 0.7,
   model: string = "stability-ai/sdxl",
   referenceImages: Buffer[] = [],
+  jobId?: string,
 ): Promise<Buffer> {
   const adapter = modelRegistry.get(model);
   const token = resolveReplicateToken(adapter.id);
@@ -197,6 +199,12 @@ export async function replicateTransform(
   });
 
   log(`Calling Replicate model=${adapter.id} (${adapter.name}) — prompt: "${prompt.slice(0, 60)}…"`);
+  const obs = jobId
+    ? startGeneration(jobId, "image-model", adapter.id, {
+        prompt: prompt.slice(0, 500),
+        referenceCount: refsToUpload.length,
+      })
+    : null;
 
   let lastErr: unknown;
 
@@ -249,16 +257,20 @@ export async function replicateTransform(
         responseType: "arraybuffer",
         timeout: 30_000,
       });
-      return Buffer.from(imgData);
+      const out = Buffer.from(imgData);
+      obs?.end({ outputBytes: out.length, predictionId: result.id });
+      return out;
     } catch (err) {
       lastErr = err;
       if (!isRetryable(err)) {
         log(`Replicate error: ${extractErrorDetail(err)}`);
+        obs?.fail(err);
         throw err;
       }
     }
   }
 
+  obs?.fail(lastErr);
   throw lastErr;
 }
 
@@ -271,6 +283,7 @@ export async function executePlanStep(
   planStep: PlanStep,
   model: string,
   referenceImages: Buffer[] = [],
+  jobId?: string,
 ): Promise<Buffer> {
   if (planStep.tool === "replicate") {
     return replicateTransform(
@@ -279,6 +292,7 @@ export async function executePlanStep(
       (planStep.parameters.strength as number) ?? 0.7,
       model,
       referenceImages,
+      jobId,
     );
   }
 

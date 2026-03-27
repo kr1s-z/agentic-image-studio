@@ -6,6 +6,10 @@ frontend:
 #   env:
 #     createSecret: true
 #     replicateApiToken: ""
+#     langfusePublicKey: ""
+#     langfuseSecretKey: ""
 #     extra:
+#       LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
 #       LLM_MODEL: "openai/gpt-4o"
+#       LLM_MIN_REQUEST_GAP_MS: "2000"
 #       MAX_ITERATIONS: "5"

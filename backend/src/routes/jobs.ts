@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { getJob, setJob } from "../store";
 import { runWorkflow } from "../services/workflow";
 import type { Job, ImageEntry } from "../types";
+import { startJobTrace, cancelJobTrace } from "../services/observability";
 
 const router = Router();
 
@@ -60,6 +61,13 @@ router.post("/jobs", upload.array("images", 10), async (req, res) => {
   };
 
   setJob(job);
+  startJobTrace({
+    jobId,
+    goal,
+    model: job.model,
+    imageCount: images.length,
+    maxIterations: job.maxIterations,
+  });
   console.log(
     `[api] Job created: ${jobId} — model: ${job.model} — ${images.length} image(s) — goal: "${goal.slice(0, 80)}"`,
   );
@@ -98,6 +106,7 @@ router.post("/jobs/:jobId/cancel", (req, res) => {
 
   job.cancelled = true;
   job.status = "cancelled";
+  cancelJobTrace(job.id);
 
   const { broadcastStatus } = require("../services/broadcast");
   broadcastStatus(job.id, "cancelled", "Job cancelled by user");

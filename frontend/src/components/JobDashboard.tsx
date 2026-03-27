@@ -103,7 +103,8 @@ export default function JobDashboard({
 
   const errorMsg = useMemo<string | null>(() => {
     const err = trace.find((m) => m.type === "error");
-    return err?.message ?? null;
+    if (!err) return null;
+    return err.detail || err.message || null;
   }, [trace]);
 
   const isTerminal =

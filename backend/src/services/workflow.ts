@@ -1,6 +1,7 @@
 import { getJob } from "../store";
 import { analyzeImage, createPlan, critique } from "./llm";
 import { executePlanStep, saveImage, isReplicateAvailable } from "./imaging";
+import { startSpan, completeJobTrace, failJobTrace } from "./observability";
 import {
   broadcastStep,
   broadcastStatus,
@@ -59,7 +60,14 @@ export async function runWorkflow(jobId: string): Promise<void> {
       const imageBuffers = iter === 1
         ? job.images.map((img) => img.buffer)
         : [job.currentImage];
-      const analysis: VisionAnalysis = await analyzeImage(imageBuffers, job.goal, job.history);
+      const visionObs = startSpan(jobId, "vision-analysis", { imageCount: imageBuffers.length });
+      const analysis: VisionAnalysis = await analyzeImage(
+        imageBuffers,
+        job.goal,
+        job.history,
+        jobId,
+      );
+      visionObs.end({ description: analysis.description, suggestions: analysis.suggestions });
 
       broadcastStep(jobId, "vision", {
         message: "Vision analysis complete",
@@ -80,6 +88,7 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
       });
 
+      const planObs = startSpan(jobId, "plan-creation", { iteration: iter, model: job.model });
       const plan: Plan = await createPlan(
         job.goal,
         analysis,
@@ -88,7 +97,9 @@ export async function runWorkflow(jobId: string): Promise<void> {
         job.history,
         job.model,
         isReplicateAvailable(),
+        jobId,
       );
+      planObs.end({ steps: plan.steps.length, reasoning: plan.reasoning });
 
       broadcastStep(jobId, "plan", {
         message: `Plan created — ${plan.steps.length} execution steps`,
@@ -127,12 +138,20 @@ export async function runWorkflow(jobId: string): Promise<void> {
         });
 
         const referenceImages = job.images.slice(1).map((img) => img.buffer);
+        const executeObs = startSpan(jobId, "execute-step", {
+          iteration: iter,
+          action: planStep.action,
+          tool: planStep.tool,
+          model: job.model,
+        });
         job.currentImage = await executePlanStep(
           job.currentImage,
           planStep,
           job.model,
           referenceImages,
+          jobId,
         );
+        executeObs.end({ action: planStep.action });
 
         const imageUrl = await saveImage(
           jobId,
@@ -161,13 +180,16 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
       });
 
+      const criticObs = startSpan(jobId, "critic-evaluation", { iteration: iter });
       const critiqueResult: Critique = await critique(
         job.currentImage,
         job.goal,
         iter,
         job.maxIterations,
         job.history,
+        jobId,
       );
+      criticObs.end({ score: critiqueResult.score, approved: critiqueResult.approved });
 
       job.finalScore = critiqueResult.score;
 
@@ -210,12 +232,20 @@ export async function runWorkflow(jobId: string): Promise<void> {
       totalSteps: totalStepCount,
       finalScore: job.finalScore ?? 0,
     });
+    completeJobTrace(jobId, {
+      status: "completed",
+      iterations: job.iteration,
+      totalSteps: totalStepCount,
+      finalScore: job.finalScore ?? 0,
+      finalImageUrl: finalUrl,
+    });
 
     log(jobId, "Workflow complete");
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     log(jobId, `Workflow failed: ${msg}`);
     job.status = "failed";
-    broadcastError(jobId, "Workflow failed", msg);
+    failJobTrace(jobId, err);
+    broadcastError(jobId, msg);
   }
 }

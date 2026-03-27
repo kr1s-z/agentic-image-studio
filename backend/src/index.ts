@@ -9,6 +9,7 @@ import { hasJob, getJob } from "./store";
 import { addClient, removeClient, replayHistory } from "./services/broadcast";
 import { llmModelName } from "./services/llm";
 import { isReplicateConfigured } from "./config/env";
+import { isObservabilityEnabled } from "./services/observability";
 
 const app = express();
 const server = http.createServer(app);
@@ -26,6 +27,7 @@ app.get("/api/health", (_req, res) => {
     status: configured ? "ok" : "misconfigured",
     replicate: configured ? "configured" : "missing REPLICATE_API_TOKEN",
     llmModel: llmModelName(),
+    observability: isObservabilityEnabled() ? "langfuse" : "disabled",
   });
 });
 
@@ -78,6 +80,7 @@ server.listen(PORT, () => {
   const configured = isReplicateConfigured();
   console.log(`  Replicate: ${configured ? "configured" : "NOT configured (set REPLICATE_API_TOKEN)"}`);
   console.log(`  LLM model: ${llmModelName()}`);
+  console.log(`  Observability: ${isObservabilityEnabled() ? "Langfuse enabled" : "disabled"}`);
   if (!configured) console.warn("  ⚠  REPLICATE_API_TOKEN is missing — all API calls will fail");
   console.log();
 });

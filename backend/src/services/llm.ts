@@ -10,6 +10,7 @@ import {
   CRITIC_SYSTEM_PROMPT,
   criticUserText,
 } from "../prompts/llm";
+import { startGeneration } from "./observability";
 
 const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 const LLM_MODEL = process.env.LLM_MODEL || "openai/gpt-4o";
@@ -167,6 +168,7 @@ export async function analyzeImage(
   imageBuffers: Buffer[],
   goal: string,
   history: WSMessage[],
+  jobId?: string,
 ): Promise<VisionAnalysis> {
   log(`Calling vision analysis on ${imageBuffers.length} image(s)…`);
 
@@ -189,6 +191,9 @@ export async function analyzeImage(
 
   const imageNote = visionMultiImageNote(imageBuffers.length);
 
+  const obs = jobId
+    ? startGeneration(jobId, "llm-vision", LLM_MODEL, { imageCount: imageBuffers.length })
+    : null;
   const content = await predict({
     system_prompt: visionSystemPrompt(imageNote),
     prompt: visionUserText(goal, historySection, imageBuffers.length > 1),
@@ -196,8 +201,14 @@ export async function analyzeImage(
     temperature: 0.3,
     max_completion_tokens: 2000,
   });
-
-  return parseJSONWithRepair<VisionAnalysis>(content);
+  try {
+    const parsed = await parseJSONWithRepair<VisionAnalysis>(content);
+    obs?.end(parsed);
+    return parsed;
+  } catch (err) {
+    obs?.fail(err);
+    throw err;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,6 +223,7 @@ export async function createPlan(
   history: WSMessage[],
   modelId: string,
   replicateAvailable: boolean,
+  jobId?: string,
 ): Promise<Plan> {
   log("Calling planner…");
 
@@ -227,6 +239,9 @@ export async function createPlan(
     ? `\nPrevious critic feedback to address:\n${prevCritique}`
     : "";
 
+  const obs = jobId
+    ? startGeneration(jobId, "llm-planner", LLM_MODEL, { iteration, modelId })
+    : null;
   const content = await predict({
     system_prompt: plannerSystemPrompt(replicateAvailable, modelId),
     prompt: plannerUserText(
@@ -240,8 +255,14 @@ export async function createPlan(
     temperature: 0.3,
     max_completion_tokens: 2000,
   });
-
-  return parseJSONWithRepair<Plan>(content);
+  try {
+    const parsed = await parseJSONWithRepair<Plan>(content);
+    obs?.end({ steps: parsed.steps.length, reasoning: parsed.reasoning });
+    return parsed;
+  } catch (err) {
+    obs?.fail(err);
+    throw err;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -254,6 +275,7 @@ export async function critique(
   iteration: number,
   maxIterations: number,
   history: WSMessage[],
+  jobId?: string,
 ): Promise<Critique> {
   log("Calling critic…");
 
@@ -264,6 +286,9 @@ export async function critique(
     .map((h) => `[iter ${h.iteration}] ${h.step}: ${h.message}`)
     .join("\n");
 
+  const obs = jobId
+    ? startGeneration(jobId, "llm-critic", LLM_MODEL, { iteration, maxIterations })
+    : null;
   const content = await predict({
     system_prompt: CRITIC_SYSTEM_PROMPT,
     prompt: criticUserText(goal, iteration, maxIterations, histSummary),
@@ -271,6 +296,12 @@ export async function critique(
     temperature: 0.3,
     max_completion_tokens: 2000,
   });
-
-  return parseJSONWithRepair<Critique>(content);
+  try {
+    const parsed = await parseJSONWithRepair<Critique>(content);
+    obs?.end({ score: parsed.score, approved: parsed.approved });
+    return parsed;
+  } catch (err) {
+    obs?.fail(err);
+    throw err;
+  }
 }
