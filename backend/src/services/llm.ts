@@ -11,14 +11,17 @@ import {
   criticUserText,
 } from "../prompts/llm";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_BASE_URL =
-  process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o";
-const TIMEOUT = 90_000;
+const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
+const LLM_MODEL = process.env.LLM_MODEL || "openai/gpt-4o";
+const TIMEOUT = 120_000;
+const POLL_INTERVAL = 2_000;
 
 export function isLLMAvailable(): boolean {
-  return !!OPENAI_API_KEY;
+  return !!REPLICATE_TOKEN;
+}
+
+export function llmModelName(): string {
+  return LLM_MODEL;
 }
 
 function log(msg: string): void {
@@ -33,36 +36,56 @@ function parseJSON<T>(raw: string): T {
   return JSON.parse(cleaned.trim());
 }
 
-async function chat(
-  messages: unknown[],
-  jsonMode: boolean = true,
-): Promise<string> {
-  const body: Record<string, unknown> = {
-    model: MODEL,
-    messages,
-    max_tokens: 2000,
-    temperature: 0.3,
-  };
-  if (jsonMode) body.response_format = { type: "json_object" };
-
-  const res = await axios.post(`${OPENAI_BASE_URL}/chat/completions`, body, {
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
+/**
+ * Call a Replicate-hosted LLM via the predictions API.
+ * Uses the `Prefer: wait` header for synchronous completion, with polling fallback.
+ */
+async function predict(input: Record<string, unknown>): Promise<string> {
+  const createRes = await axios.post(
+    `https://api.replicate.com/v1/models/${LLM_MODEL}/predictions`,
+    { input },
+    {
+      headers: {
+        Authorization: `Bearer ${REPLICATE_TOKEN}`,
+        "Content-Type": "application/json",
+        Prefer: "wait",
+      },
+      timeout: TIMEOUT,
     },
-    timeout: TIMEOUT,
-  });
-  return res.data.choices[0].message.content;
+  );
+
+  let prediction = createRes.data;
+
+  while (
+    prediction.status !== "succeeded" &&
+    prediction.status !== "failed" &&
+    prediction.status !== "canceled"
+  ) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    const pollRes = await axios.get(prediction.urls.get, {
+      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
+      timeout: 30_000,
+    });
+    prediction = pollRes.data;
+  }
+
+  if (prediction.status !== "succeeded") {
+    throw new Error(
+      `LLM prediction failed: ${prediction.error || prediction.status}`,
+    );
+  }
+
+  const output = prediction.output;
+  if (Array.isArray(output)) return output.join("");
+  return String(output);
 }
 
-async function imageToBase64(
-  buf: Buffer,
-): Promise<{ base64: string; mime: string }> {
+async function imageToDataUri(buf: Buffer): Promise<string> {
   const resized = await sharp(buf)
     .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 80 })
     .toBuffer();
-  return { base64: resized.toString("base64"), mime: "image/jpeg" };
+  return `data:image/jpeg;base64,${resized.toString("base64")}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -77,7 +100,7 @@ export async function analyzeImage(
   if (!isLLMAvailable()) return simulateVision(goal);
   log(`Calling vision analysis on ${imageBuffers.length} image(s)…`);
 
-  const encoded = await Promise.all(imageBuffers.map(imageToBase64));
+  const imageUris = await Promise.all(imageBuffers.map(imageToDataUri));
 
   const prevFeedback = history
     .filter(
@@ -96,27 +119,13 @@ export async function analyzeImage(
 
   const imageNote = visionMultiImageNote(imageBuffers.length);
 
-  const userContent: unknown[] = [
-    {
-      type: "text",
-      text: visionUserText(goal, historySection, imageBuffers.length > 1),
-    },
-    ...encoded.map(({ base64, mime }) => ({
-      type: "image_url",
-      image_url: { url: `data:${mime};base64,${base64}` },
-    })),
-  ];
-
-  const content = await chat([
-    {
-      role: "system",
-      content: visionSystemPrompt(imageNote),
-    },
-    {
-      role: "user",
-      content: userContent,
-    },
-  ]);
+  const content = await predict({
+    system_prompt: visionSystemPrompt(imageNote),
+    prompt: visionUserText(goal, historySection, imageBuffers.length > 1),
+    image_input: imageUris,
+    temperature: 0.3,
+    max_completion_tokens: 2000,
+  });
 
   return parseJSON<VisionAnalysis>(content);
 }
@@ -147,22 +156,18 @@ export async function createPlan(
     ? `\nPrevious critic feedback to address:\n${prevCritique}`
     : "";
 
-  const content = await chat([
-    {
-      role: "system",
-      content: PLANNER_SYSTEM_PROMPT,
-    },
-    {
-      role: "user",
-      content: plannerUserText(
-        goal,
-        iteration,
-        maxIterations,
-        JSON.stringify(analysis),
-        feedbackSection,
-      ),
-    },
-  ]);
+  const content = await predict({
+    system_prompt: PLANNER_SYSTEM_PROMPT,
+    prompt: plannerUserText(
+      goal,
+      iteration,
+      maxIterations,
+      JSON.stringify(analysis),
+      feedbackSection,
+    ),
+    temperature: 0.3,
+    max_completion_tokens: 2000,
+  });
 
   return parseJSON<Plan>(content);
 }
@@ -181,38 +186,26 @@ export async function critique(
   if (!isLLMAvailable()) return simulateCritique(iteration, maxIterations);
   log("Calling critic…");
 
-  const { base64, mime } = await imageToBase64(imageBuffer);
+  const dataUri = await imageToDataUri(imageBuffer);
 
   const histSummary = history
     .filter((h) => h.type === "step")
     .map((h) => `[iter ${h.iteration}] ${h.step}: ${h.message}`)
     .join("\n");
 
-  const content = await chat([
-    {
-      role: "system",
-      content: CRITIC_SYSTEM_PROMPT,
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: criticUserText(goal, iteration, maxIterations, histSummary),
-        },
-        {
-          type: "image_url",
-          image_url: { url: `data:${mime};base64,${base64}` },
-        },
-      ],
-    },
-  ]);
+  const content = await predict({
+    system_prompt: CRITIC_SYSTEM_PROMPT,
+    prompt: criticUserText(goal, iteration, maxIterations, histSummary),
+    image_input: [dataUri],
+    temperature: 0.3,
+    max_completion_tokens: 2000,
+  });
 
   return parseJSON<Critique>(content);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Simulation fallback (when OPENAI_API_KEY is not set)               */
+/*  Simulation fallback (when REPLICATE_API_TOKEN is not set)          */
 /* ------------------------------------------------------------------ */
 
 function simulateVision(goal: string): VisionAnalysis {

@@ -7,7 +7,7 @@ import { WebSocketServer } from "ws";
 import { jobRoutes, runWorkflow } from "./routes/jobs";
 import { hasJob, getJob } from "./store";
 import { addClient, removeClient, replayHistory } from "./services/broadcast";
-import { isLLMAvailable } from "./services/llm";
+import { isLLMAvailable, llmModelName } from "./services/llm";
 import { isReplicateAvailable } from "./services/imaging";
 
 const app = express();
@@ -74,7 +74,7 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, () => {
   console.log(`\n  Backend listening on :${PORT}`);
-  console.log(`  LLM mode: ${isLLMAvailable() ? "OpenAI (" + (process.env.OPENAI_MODEL || "gpt-4o") + ")" : "SIMULATION (set OPENAI_API_KEY for real LLM)"}`);
-  console.log(`  Replicate: ${isReplicateAvailable() ? "enabled" : "disabled (set REPLICATE_API_TOKEN)"}`);
+  console.log(`  LLM mode: ${isLLMAvailable() ? `Replicate (${llmModelName()})` : "SIMULATION (set REPLICATE_API_TOKEN for real LLM)"}`);
+  console.log(`  Replicate imaging: ${isReplicateAvailable() ? "enabled" : "disabled (set REPLICATE_API_TOKEN)"}`);
   console.log();
 });

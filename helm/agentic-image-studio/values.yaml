@@ -29,6 +29,7 @@ backend:
 
     # Non-secret env vars (plain key/value on the Deployment).
     extra:
+      LLM_MODEL: ""
       MAX_ITERATIONS: ""
 
 ingress:

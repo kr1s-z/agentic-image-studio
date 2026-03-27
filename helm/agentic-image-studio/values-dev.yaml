@@ -7,4 +7,5 @@ frontend:
 #     createSecret: true
 #     replicateApiToken: ""
 #     extra:
+#       LLM_MODEL: "openai/gpt-4o"
 #       MAX_ITERATIONS: "5"

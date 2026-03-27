@@ -1,6 +1,6 @@
 /**
- * Resolves API keys from environment.
- * Replicate uses a single shared token for all models.
+ * Resolves API keys and config from environment.
+ * Everything runs through Replicate — one token for image models and LLM.
  */
 
 function pick(...candidates: (string | undefined)[]): string | undefined {
@@ -11,16 +11,16 @@ function pick(...candidates: (string | undefined)[]): string | undefined {
   return undefined;
 }
 
-/** OpenAI API key for vision, planning, and critic (chat completions). */
-export function openaiApiKey(): string | undefined {
-  return pick(process.env.OPENAI_API_KEY);
-}
-
-/** Replicate bearer token used for all models. */
+/** Replicate bearer token used for all models (image + LLM). */
 export function resolveReplicateToken(_modelId?: string): string | undefined {
   return pick(process.env.REPLICATE_API_TOKEN);
 }
 
 export function isReplicateConfigured(): boolean {
   return !!pick(process.env.REPLICATE_API_TOKEN);
+}
+
+/** Which Replicate-hosted model to use for vision/planning/critic reasoning. */
+export function llmModel(): string {
+  return process.env.LLM_MODEL || "openai/gpt-4o";
 }
