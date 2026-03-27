@@ -16,6 +16,21 @@ backend:
   port: 3000
   host: backend.lvh.me
 
+  # Environment for the backend container — wired in templates/backend-deployment.yaml
+  # and templates/backend-secret.yaml.
+  env:
+    # When true, creates a Secret from the key fields below and mounts via envFrom.
+    createSecret: true
+    # If set, createSecret should be false; use an existing Secret with the same key.
+    existingSecretName: ""
+
+    # Sensitive values -> Secret stringData.
+    replicateApiToken: ""
+
+    # Non-secret env vars (plain key/value on the Deployment).
+    extra:
+      MAX_ITERATIONS: ""
+
 ingress:
   enabled: true
   className: nginx

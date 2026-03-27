@@ -4,8 +4,8 @@ import path from "path";
 import fs from "fs";
 import type { PlanStep } from "../types";
 import { modelRegistry } from "../models";
+import { isReplicateConfigured, resolveReplicateToken } from "../config/env";
 
-const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 const UPLOADS_DIR = path.join(__dirname, "../../uploads");
 
 if (!fs.existsSync(UPLOADS_DIR))
@@ -16,7 +16,7 @@ function log(msg: string): void {
 }
 
 export function isReplicateAvailable(): boolean {
-  return !!REPLICATE_TOKEN;
+  return isReplicateConfigured();
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,9 +121,13 @@ export async function replicateTransform(
   model: string = "stability-ai/sdxl",
   referenceImages: Buffer[] = [],
 ): Promise<Buffer> {
-  if (!REPLICATE_TOKEN) throw new Error("REPLICATE_API_TOKEN not set");
-
   const adapter = modelRegistry.get(model);
+  const token = resolveReplicateToken(adapter.id);
+  if (!token) {
+    throw new Error(
+      "No Replicate API token: set REPLICATE_API_TOKEN",
+    );
+  }
 
   const primaryDataUrl = await bufToDataUrl(buf);
   const refDataUrls = await Promise.all(referenceImages.map(bufToDataUrl));
@@ -142,7 +146,7 @@ export async function replicateTransform(
     { model: adapter.id, input },
     {
       headers: {
-        Authorization: `Bearer ${REPLICATE_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Prefer: "wait",
       },
@@ -160,7 +164,7 @@ export async function replicateTransform(
       await new Promise((r) => setTimeout(r, 2000));
       const { data } = await axios.get(
         `https://api.replicate.com/v1/predictions/${result.id}`,
-        { headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` } },
+        { headers: { Authorization: `Bearer ${token}` } },
       );
       result = data;
     }

@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./loadEnv";
 import express from "express";
 import cors from "cors";
 import http from "http";
@@ -8,6 +8,7 @@ import { jobRoutes, runWorkflow } from "./routes/jobs";
 import { hasJob, getJob } from "./store";
 import { addClient, removeClient, replayHistory } from "./services/broadcast";
 import { isLLMAvailable } from "./services/llm";
+import { isReplicateAvailable } from "./services/imaging";
 
 const app = express();
 const server = http.createServer(app);
@@ -23,7 +24,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
     llm: isLLMAvailable() ? "connected" : "simulation",
-    replicate: !!process.env.REPLICATE_API_TOKEN ? "connected" : "disabled",
+    replicate: isReplicateAvailable() ? "configured" : "disabled",
   });
 });
 
@@ -74,6 +75,6 @@ wss.on("connection", (ws) => {
 server.listen(PORT, () => {
   console.log(`\n  Backend listening on :${PORT}`);
   console.log(`  LLM mode: ${isLLMAvailable() ? "OpenAI (" + (process.env.OPENAI_MODEL || "gpt-4o") + ")" : "SIMULATION (set OPENAI_API_KEY for real LLM)"}`);
-  console.log(`  Replicate: ${process.env.REPLICATE_API_TOKEN ? "enabled" : "disabled (set REPLICATE_API_TOKEN for AI img2img)"}`);
+  console.log(`  Replicate: ${isReplicateAvailable() ? "enabled" : "disabled (set REPLICATE_API_TOKEN)"}`);
   console.log();
 });

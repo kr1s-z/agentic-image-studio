@@ -24,6 +24,21 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.backend.port }}"
+            {{- range $name, $val := (.Values.backend.env.extra | default dict) }}
+            {{- if $val }}
+            - name: {{ $name }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- end }}
+          {{- if .Values.backend.env.createSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ include "app.fullname" . }}-backend-secrets
+          {{- else if .Values.backend.env.existingSecretName }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.backend.env.existingSecretName }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /api/health

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+helm/agentic-image-studio/values-secrets.local.yaml
 *.log
 .DS_Store
 uploads/

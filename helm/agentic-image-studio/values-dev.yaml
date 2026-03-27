@@ -1,2 +1,10 @@
 frontend:
   port: 5173
+
+# Optional: inject key for local Helm/Tilt (or use values-secrets.local.yaml).
+# backend:
+#   env:
+#     createSecret: true
+#     replicateApiToken: ""
+#     extra:
+#       MAX_ITERATIONS: "5"
