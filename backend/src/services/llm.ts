@@ -5,7 +5,7 @@ import {
   visionMultiImageNote,
   visionSystemPrompt,
   visionUserText,
-  PLANNER_SYSTEM_PROMPT,
+  plannerSystemPrompt,
   plannerUserText,
   CRITIC_SYSTEM_PROMPT,
   criticUserText,
@@ -15,10 +15,10 @@ const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
 const LLM_MODEL = process.env.LLM_MODEL || "openai/gpt-4o";
 const TIMEOUT = 120_000;
 const POLL_INTERVAL = 2_000;
-
-export function isLLMAvailable(): boolean {
-  return !!REPLICATE_TOKEN;
-}
+const MAX_RETRIES = 5;
+const RETRY_BASE_MS = 2_000;
+const MIN_REQUEST_GAP_MS = Number(process.env.LLM_MIN_REQUEST_GAP_MS || 2000);
+let nextAllowedRequestAt = 0;
 
 export function llmModelName(): string {
   return LLM_MODEL;
@@ -36,48 +36,119 @@ function parseJSON<T>(raw: string): T {
   return JSON.parse(cleaned.trim());
 }
 
+async function parseJSONWithRepair<T>(raw: string): Promise<T> {
+  try {
+    return parseJSON<T>(raw);
+  } catch (firstErr) {
+    log("Invalid JSON from LLM — attempting repair pass");
+    const repaired = await predict({
+      system_prompt:
+        "You convert malformed JSON-like text into strict valid JSON. Return JSON only, no markdown, no commentary.",
+      prompt:
+        `Fix this content into valid JSON while preserving meaning:\n\n${raw.slice(0, 12_000)}`,
+      temperature: 0,
+      max_completion_tokens: 2000,
+    });
+    try {
+      return parseJSON<T>(repaired);
+    } catch {
+      throw firstErr;
+    }
+  }
+}
+
+function isRetryable(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  const status = err.response?.status;
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function retryDelay(attempt: number): number {
+  return RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 1_000;
+}
+
+function retryAfterMs(err: unknown): number | undefined {
+  if (!axios.isAxiosError(err)) return undefined;
+  const h = err.response?.headers?.["retry-after"];
+  if (!h) return undefined;
+  const first = Array.isArray(h) ? h[0] : h;
+  const secs = Number(first);
+  if (Number.isFinite(secs) && secs > 0) return secs * 1000;
+  return undefined;
+}
+
+async function waitForRateWindow(): Promise<void> {
+  const now = Date.now();
+  if (now < nextAllowedRequestAt) {
+    await new Promise((r) => setTimeout(r, nextAllowedRequestAt - now));
+  }
+}
+
 /**
  * Call a Replicate-hosted LLM via the predictions API.
- * Uses the `Prefer: wait` header for synchronous completion, with polling fallback.
+ * Retries on 429/5xx with exponential backoff.
  */
 async function predict(input: Record<string, unknown>): Promise<string> {
-  const createRes = await axios.post(
-    `https://api.replicate.com/v1/models/${LLM_MODEL}/predictions`,
-    { input },
-    {
-      headers: {
-        Authorization: `Bearer ${REPLICATE_TOKEN}`,
-        "Content-Type": "application/json",
-        Prefer: "wait",
-      },
-      timeout: TIMEOUT,
-    },
-  );
-
-  let prediction = createRes.data;
-
-  while (
-    prediction.status !== "succeeded" &&
-    prediction.status !== "failed" &&
-    prediction.status !== "canceled"
-  ) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-    const pollRes = await axios.get(prediction.urls.get, {
-      headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
-      timeout: 30_000,
-    });
-    prediction = pollRes.data;
+  if (!REPLICATE_TOKEN) {
+    throw new Error("REPLICATE_API_TOKEN is not set — cannot call LLM");
   }
 
-  if (prediction.status !== "succeeded") {
-    throw new Error(
-      `LLM prediction failed: ${prediction.error || prediction.status}`,
-    );
+  let lastErr: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const wait = retryAfterMs(lastErr) ?? retryDelay(attempt - 1);
+      log(`Rate limited — retrying in ${Math.round(wait / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+
+    try {
+      await waitForRateWindow();
+      const createRes = await axios.post(
+        `https://api.replicate.com/v1/models/${LLM_MODEL}/predictions`,
+        { input },
+        {
+          headers: {
+            Authorization: `Bearer ${REPLICATE_TOKEN}`,
+            "Content-Type": "application/json",
+            Prefer: "wait",
+          },
+          timeout: TIMEOUT,
+        },
+      );
+      nextAllowedRequestAt = Date.now() + MIN_REQUEST_GAP_MS;
+
+      let prediction = createRes.data;
+
+      while (
+        prediction.status !== "succeeded" &&
+        prediction.status !== "failed" &&
+        prediction.status !== "canceled"
+      ) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+        const pollRes = await axios.get(prediction.urls.get, {
+          headers: { Authorization: `Bearer ${REPLICATE_TOKEN}` },
+          timeout: 30_000,
+        });
+        prediction = pollRes.data;
+      }
+
+      if (prediction.status !== "succeeded") {
+        throw new Error(
+          `LLM prediction failed: ${prediction.error || prediction.status}`,
+        );
+      }
+
+      const output = prediction.output;
+      if (Array.isArray(output)) return output.join("");
+      return String(output);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err)) throw err;
+    }
   }
 
-  const output = prediction.output;
-  if (Array.isArray(output)) return output.join("");
-  return String(output);
+  throw lastErr;
 }
 
 async function imageToDataUri(buf: Buffer): Promise<string> {
@@ -97,7 +168,6 @@ export async function analyzeImage(
   goal: string,
   history: WSMessage[],
 ): Promise<VisionAnalysis> {
-  if (!isLLMAvailable()) return simulateVision(goal);
   log(`Calling vision analysis on ${imageBuffers.length} image(s)…`);
 
   const imageUris = await Promise.all(imageBuffers.map(imageToDataUri));
@@ -127,7 +197,7 @@ export async function analyzeImage(
     max_completion_tokens: 2000,
   });
 
-  return parseJSON<VisionAnalysis>(content);
+  return parseJSONWithRepair<VisionAnalysis>(content);
 }
 
 /* ------------------------------------------------------------------ */
@@ -140,8 +210,9 @@ export async function createPlan(
   iteration: number,
   maxIterations: number,
   history: WSMessage[],
+  modelId: string,
+  replicateAvailable: boolean,
 ): Promise<Plan> {
-  if (!isLLMAvailable()) return simulatePlan(goal, iteration);
   log("Calling planner…");
 
   const prevCritique = history
@@ -157,19 +228,20 @@ export async function createPlan(
     : "";
 
   const content = await predict({
-    system_prompt: PLANNER_SYSTEM_PROMPT,
+    system_prompt: plannerSystemPrompt(replicateAvailable, modelId),
     prompt: plannerUserText(
       goal,
       iteration,
       maxIterations,
       JSON.stringify(analysis),
       feedbackSection,
+      modelId,
     ),
     temperature: 0.3,
     max_completion_tokens: 2000,
   });
 
-  return parseJSON<Plan>(content);
+  return parseJSONWithRepair<Plan>(content);
 }
 
 /* ------------------------------------------------------------------ */
@@ -183,7 +255,6 @@ export async function critique(
   maxIterations: number,
   history: WSMessage[],
 ): Promise<Critique> {
-  if (!isLLMAvailable()) return simulateCritique(iteration, maxIterations);
   log("Calling critic…");
 
   const dataUri = await imageToDataUri(imageBuffer);
@@ -201,123 +272,5 @@ export async function critique(
     max_completion_tokens: 2000,
   });
 
-  return parseJSON<Critique>(content);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Simulation fallback (when REPLICATE_API_TOKEN is not set)          */
-/* ------------------------------------------------------------------ */
-
-function simulateVision(goal: string): VisionAnalysis {
-  const gl = goal.toLowerCase();
-  let desc =
-    "Scene with a primary subject against a mixed background. Moderate lighting with some color cast.";
-  const suggestions: string[] = [];
-
-  if (gl.includes("headshot") || gl.includes("portrait") || gl.includes("linkedin")) {
-    desc =
-      "Portrait/headshot detected. Face centered, indoor background with moderate clutter, ambient lighting from left.";
-    suggestions.push(
-      "Enhance studio lighting",
-      "Replace background with clean gradient",
-      "Apply professional color grading",
-    );
-  } else if (gl.includes("cyberpunk") || gl.includes("neon") || gl.includes("digital art")) {
-    desc =
-      "Scene composition with urban elements and natural color palette. Geometric shapes suitable for style-transfer anchoring.";
-    suggestions.push(
-      "Shift to neon color palette",
-      "Add volumetric atmosphere effects",
-      "Generate cyberpunk detail overlays",
-    );
-  } else if (gl.includes("product") || gl.includes("e-commerce") || gl.includes("white background")) {
-    desc =
-      "Product image with main subject centered, complex background with shadows. Slight warm color cast.";
-    suggestions.push(
-      "Isolate product subject",
-      "Replace with pure white background",
-      "Correct color cast and add natural shadow",
-    );
-  } else {
-    suggestions.push(
-      "Analyze composition and focal points",
-      "Enhance quality and color balance",
-      "Apply creative adjustments aligned with goal",
-    );
-  }
-
-  return {
-    description: desc,
-    objects: ["primary_subject", "background", "lighting_source"],
-    quality: { score: 6.8, issues: ["moderate noise", "slight color cast", "could use more contrast"] },
-    style: "casual photograph",
-    relevanceToGoal: `Image provides a solid starting point for: "${goal.slice(0, 80)}"`,
-    suggestions,
-  };
-}
-
-function simulatePlan(goal: string, iteration: number): Plan {
-  const gl = goal.toLowerCase();
-  let steps: Plan["steps"];
-
-  if (gl.includes("headshot") || gl.includes("portrait") || gl.includes("linkedin")) {
-    steps = [
-      { order: 1, action: "Lighting enhancement", description: "Adjust exposure and white balance for studio quality", tool: "sharp", parameters: { operation: "brightness", value: 1.15 } },
-      { order: 2, action: "Contrast boost", description: "Increase contrast for professional punch", tool: "sharp", parameters: { operation: "contrast", value: 1.2 } },
-      { order: 3, action: "Sharpening", description: "Sharpen details for crisp professional look", tool: "sharp", parameters: { operation: "sharpen", sigma: 1.5 } },
-    ];
-  } else if (gl.includes("cyberpunk") || gl.includes("neon") || gl.includes("digital art")) {
-    steps = [
-      { order: 1, action: "Saturate colors", description: "Boost saturation for vibrant neon palette", tool: "sharp", parameters: { operation: "saturation", value: 1.8 } },
-      { order: 2, action: "Tint shift", description: "Apply cool blue-purple tint for cyberpunk feel", tool: "sharp", parameters: { operation: "tint", r: 100, g: 80, b: 220 } },
-      { order: 3, action: "Sharpen details", description: "Sharpen for crisp digital art look", tool: "sharp", parameters: { operation: "sharpen", sigma: 2.0 } },
-    ];
-  } else if (gl.includes("product") || gl.includes("e-commerce")) {
-    steps = [
-      { order: 1, action: "Normalize levels", description: "Auto-level for neutral color balance", tool: "sharp", parameters: { operation: "normalize" } },
-      { order: 2, action: "Brightness boost", description: "Brighten for clean product photography", tool: "sharp", parameters: { operation: "brightness", value: 1.2 } },
-      { order: 3, action: "Sharpening", description: "Sharpen product details", tool: "sharp", parameters: { operation: "sharpen", sigma: 1.8 } },
-    ];
-  } else {
-    steps = [
-      { order: 1, action: "Normalize", description: "Auto-level and balance overall exposure", tool: "sharp", parameters: { operation: "normalize" } },
-      { order: 2, action: "Enhance contrast", description: "Boost contrast for visual impact", tool: "sharp", parameters: { operation: "contrast", value: 1.15 } },
-      { order: 3, action: "Sharpen", description: "Apply final sharpening pass", tool: "sharp", parameters: { operation: "sharpen", sigma: 1.5 } },
-    ];
-  }
-
-  if (iteration > 1) {
-    steps = steps.map((s) => ({
-      ...s,
-      action: s.action + " (refined)",
-      description: s.description + " — adjusted based on critic feedback",
-    }));
-  }
-
-  return {
-    reasoning: `Plan tailored for goal "${goal.slice(0, 60)}" using ${steps.length} steps. ${iteration > 1 ? "Refined based on previous critique." : ""}`,
-    steps,
-  };
-}
-
-function simulateCritique(iteration: number, maxIterations: number): Critique {
-  const score = iteration === 1 ? 6.2 + Math.random() * 1.5 : 8.5 + Math.random() * 1.2;
-  const approved = score >= 8.0 || iteration >= maxIterations;
-
-  return {
-    score: +score.toFixed(1),
-    feedback: approved
-      ? "Result meets quality threshold. Output is visually cohesive and well-aligned with the stated goal."
-      : "Promising result but needs refinement. Color balance and detail sharpness can be improved in the next iteration.",
-    strengths: approved
-      ? ["Good goal alignment", "Clean output", "Visually appealing"]
-      : ["Solid foundation", "Composition preserved", "Core transformations applied"],
-    weaknesses: approved
-      ? []
-      : ["Color temperature slightly off", "Could use more contrast in midtones", "Fine detail lost in some areas"],
-    approved,
-    improvements: approved
-      ? undefined
-      : ["Adjust color temperature", "Increase midtone contrast", "Apply targeted sharpening"],
-  };
+  return parseJSONWithRepair<Critique>(content);
 }

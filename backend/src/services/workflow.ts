@@ -1,6 +1,6 @@
 import { getJob } from "../store";
-import { isLLMAvailable, analyzeImage, createPlan, critique } from "./llm";
-import { executePlanStep, saveImage } from "./imaging";
+import { analyzeImage, createPlan, critique } from "./llm";
+import { executePlanStep, saveImage, isReplicateAvailable } from "./imaging";
 import {
   broadcastStep,
   broadcastStatus,
@@ -15,14 +15,11 @@ function log(jobId: string, msg: string): void {
   );
 }
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export async function runWorkflow(jobId: string): Promise<void> {
   const job = getJob(jobId);
   if (!job) return;
 
-  const mode = isLLMAvailable() ? "LLM" : "simulation";
-  log(jobId, `Starting workflow in ${mode} mode — model: ${job.model} — ${job.images.length} image(s) — max ${job.maxIterations} iterations`);
+  log(jobId, `Starting workflow — model: ${job.model} — ${job.images.length} image(s) — max ${job.maxIterations} iterations`);
 
   try {
     job.status = "running";
@@ -45,7 +42,6 @@ export async function runWorkflow(jobId: string): Promise<void> {
           `Starting iteration ${iter} — refining based on critic feedback`,
           { progress: Math.round(((iter - 1) / job.maxIterations) * 100), iteration: iter },
         );
-        await delay(mode === "simulation" ? 800 : 200);
       }
 
       /* ---------- Step 1: Vision Analysis ---------- */
@@ -60,30 +56,10 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
       });
 
-      if (mode === "simulation") await delay(1800);
-
-      let analysis: VisionAnalysis;
-      try {
-        const imageBuffers = iter === 1
-          ? job.images.map((img) => img.buffer)
-          : [job.currentImage];
-        analysis = await analyzeImage(imageBuffers, job.goal, job.history);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        broadcastStep(jobId, "vision", {
-          message: "Vision analysis failed — using fallback",
-          detail: msg,
-          iteration: iter,
-        });
-        analysis = {
-          description: "Analysis unavailable",
-          objects: [],
-          quality: { score: 5, issues: ["analysis failed"] },
-          style: "unknown",
-          relevanceToGoal: "Unable to assess",
-          suggestions: ["Proceed with generic enhancement"],
-        };
-      }
+      const imageBuffers = iter === 1
+        ? job.images.map((img) => img.buffer)
+        : [job.currentImage];
+      const analysis: VisionAnalysis = await analyzeImage(imageBuffers, job.goal, job.history);
 
       broadcastStep(jobId, "vision", {
         message: "Vision analysis complete",
@@ -91,8 +67,6 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
         data: analysis as unknown as Record<string, unknown>,
       });
-
-      if (mode === "simulation") await delay(600);
 
       /* ---------- Step 2: Planning ---------- */
       if (job.cancelled) return;
@@ -106,44 +80,15 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
       });
 
-      if (mode === "simulation") await delay(1200);
-
-      let plan: Plan;
-      try {
-        plan = await createPlan(
-          job.goal,
-          analysis,
-          iter,
-          job.maxIterations,
-          job.history,
-        );
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        broadcastStep(jobId, "plan", {
-          message: "Planning failed — using fallback plan",
-          detail: msg,
-          iteration: iter,
-        });
-        plan = {
-          reasoning: "Fallback: apply basic enhancements",
-          steps: [
-            {
-              order: 1,
-              action: "Normalize",
-              description: "Auto-level exposure",
-              tool: "sharp",
-              parameters: { operation: "normalize" },
-            },
-            {
-              order: 2,
-              action: "Sharpen",
-              description: "Sharpen details",
-              tool: "sharp",
-              parameters: { operation: "sharpen", sigma: 1.5 },
-            },
-          ],
-        };
-      }
+      const plan: Plan = await createPlan(
+        job.goal,
+        analysis,
+        iter,
+        job.maxIterations,
+        job.history,
+        job.model,
+        isReplicateAvailable(),
+      );
 
       broadcastStep(jobId, "plan", {
         message: `Plan created — ${plan.steps.length} execution steps`,
@@ -156,8 +101,6 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
         data: plan as unknown as Record<string, unknown>,
       });
-
-      if (mode === "simulation") await delay(500);
 
       /* ---------- Step 3: Execution ---------- */
       for (const planStep of plan.steps) {
@@ -183,26 +126,13 @@ export async function runWorkflow(jobId: string): Promise<void> {
           iteration: iter,
         });
 
-        if (mode === "simulation") await delay(1500 + Math.random() * 1000);
-
         const referenceImages = job.images.slice(1).map((img) => img.buffer);
-        try {
-          job.currentImage = await executePlanStep(
-            job.currentImage,
-            planStep,
-            job.model,
-            referenceImages,
-          );
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log(jobId, `Step "${planStep.action}" failed: ${msg}`);
-          broadcastStep(jobId, "execute", {
-            message: `Step failed: ${planStep.action}`,
-            detail: `Error: ${msg} — continuing with previous image`,
-            iteration: iter,
-          });
-          continue;
-        }
+        job.currentImage = await executePlanStep(
+          job.currentImage,
+          planStep,
+          job.model,
+          referenceImages,
+        );
 
         const imageUrl = await saveImage(
           jobId,
@@ -220,8 +150,6 @@ export async function runWorkflow(jobId: string): Promise<void> {
             parameters: planStep.parameters,
           },
         });
-
-        if (mode === "simulation") await delay(300);
       }
 
       /* ---------- Step 4: Critic / Reflection ---------- */
@@ -233,32 +161,13 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
       });
 
-      if (mode === "simulation") await delay(2000);
-
-      let critiqueResult: Critique;
-      try {
-        critiqueResult = await critique(
-          job.currentImage,
-          job.goal,
-          iter,
-          job.maxIterations,
-          job.history,
-        );
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        broadcastStep(jobId, "critic", {
-          message: "Critic failed — auto-approving",
-          detail: msg,
-          iteration: iter,
-        });
-        critiqueResult = {
-          score: 7.5,
-          feedback: "Critic unavailable — auto-approved",
-          strengths: [],
-          weaknesses: [],
-          approved: true,
-        };
-      }
+      const critiqueResult: Critique = await critique(
+        job.currentImage,
+        job.goal,
+        iter,
+        job.maxIterations,
+        job.history,
+      );
 
       job.finalScore = critiqueResult.score;
 
@@ -270,8 +179,6 @@ export async function runWorkflow(jobId: string): Promise<void> {
         iteration: iter,
         data: critiqueResult as unknown as Record<string, unknown>,
       });
-
-      if (mode === "simulation") await delay(400);
 
       if (critiqueResult.approved) {
         log(jobId, `Critic approved at iteration ${iter} with score ${critiqueResult.score}`);
@@ -298,7 +205,7 @@ export async function runWorkflow(jobId: string): Promise<void> {
 
     broadcastCompleted(jobId, {
       finalImageUrl: finalUrl,
-      summary: `Workflow completed in ${job.iteration} iteration(s) with ${totalStepCount} editing steps using ${job.model}. The Vision Analyzer assessed ${job.images.length} image(s), the Planner created adaptive ${mode === "LLM" ? "AI-generated" : "rule-based"} plans, the Image Editor executed all transformations, and the Critic evaluated quality at each iteration${job.finalScore ? ` (final score: ${job.finalScore}/10)` : ""}.`,
+      summary: `Workflow completed in ${job.iteration} iteration(s) with ${totalStepCount} editing steps using ${job.model}. The Vision Analyzer assessed ${job.images.length} image(s), the Planner created AI-generated plans, the Image Editor executed all transformations, and the Critic evaluated quality at each iteration${job.finalScore ? ` (final score: ${job.finalScore}/10)` : ""}.`,
       iterations: job.iteration,
       totalSteps: totalStepCount,
       finalScore: job.finalScore ?? 0,

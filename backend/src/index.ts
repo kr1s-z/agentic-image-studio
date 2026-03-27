@@ -7,8 +7,8 @@ import { WebSocketServer } from "ws";
 import { jobRoutes, runWorkflow } from "./routes/jobs";
 import { hasJob, getJob } from "./store";
 import { addClient, removeClient, replayHistory } from "./services/broadcast";
-import { isLLMAvailable, llmModelName } from "./services/llm";
-import { isReplicateAvailable } from "./services/imaging";
+import { llmModelName } from "./services/llm";
+import { isReplicateConfigured } from "./config/env";
 
 const app = express();
 const server = http.createServer(app);
@@ -21,10 +21,11 @@ const uploadsDir = path.join(__dirname, "../uploads");
 app.use("/api/uploads", express.static(uploadsDir));
 
 app.get("/api/health", (_req, res) => {
+  const configured = isReplicateConfigured();
   res.json({
-    status: "ok",
-    llm: isLLMAvailable() ? "connected" : "simulation",
-    replicate: isReplicateAvailable() ? "configured" : "disabled",
+    status: configured ? "ok" : "misconfigured",
+    replicate: configured ? "configured" : "missing REPLICATE_API_TOKEN",
+    llmModel: llmModelName(),
   });
 });
 
@@ -74,7 +75,9 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, () => {
   console.log(`\n  Backend listening on :${PORT}`);
-  console.log(`  LLM mode: ${isLLMAvailable() ? `Replicate (${llmModelName()})` : "SIMULATION (set REPLICATE_API_TOKEN for real LLM)"}`);
-  console.log(`  Replicate imaging: ${isReplicateAvailable() ? "enabled" : "disabled (set REPLICATE_API_TOKEN)"}`);
+  const configured = isReplicateConfigured();
+  console.log(`  Replicate: ${configured ? "configured" : "NOT configured (set REPLICATE_API_TOKEN)"}`);
+  console.log(`  LLM model: ${llmModelName()}`);
+  if (!configured) console.warn("  ⚠  REPLICATE_API_TOKEN is missing — all API calls will fail");
   console.log();
 });

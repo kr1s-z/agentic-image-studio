@@ -26,7 +26,29 @@ docker_build(
 )
 
 helm_release = "agentic"
-helm_extra = []
+
+def parse_dotenv(path):
+    """Parse a .env file into a dict, skipping comments and blank lines."""
+    result = {}
+    if not os.path.exists(path):
+        return result
+    for line in str(read_file(path)).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        result[key.strip()] = val.strip()
+    return result
+
+env = parse_dotenv(".env")
+
+ENV_TO_HELM = {
+    "REPLICATE_API_TOKEN": "backend.env.replicateApiToken",
+    "LLM_MODEL":           "backend.env.extra.LLM_MODEL",
+    "MAX_ITERATIONS":      "backend.env.extra.MAX_ITERATIONS",
+}
 
 helm_flags = [
     "--values=" + CHART + "/values.yaml",
@@ -35,7 +57,10 @@ helm_flags = [
 if os.path.exists(CHART + "/values-secrets.local.yaml"):
     helm_flags.append("--values=" + CHART + "/values-secrets.local.yaml")
 
-helm_flags.extend(helm_extra)
+for env_key, helm_key in ENV_TO_HELM.items():
+    val = env.get(env_key, "")
+    if val:
+        helm_flags.append("--set=" + helm_key + "=" + val)
 
 helm_deps = [
     CHART + "/templates",
@@ -44,6 +69,8 @@ helm_deps = [
 ]
 if os.path.exists(CHART + "/values-secrets.local.yaml"):
     helm_deps.append(CHART + "/values-secrets.local.yaml")
+if os.path.exists(".env"):
+    helm_deps.append(".env")
 
 # Runs `helm upgrade --install` via Tilt helm_resource.
 helm_resource(

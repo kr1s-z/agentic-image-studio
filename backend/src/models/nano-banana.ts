@@ -6,8 +6,8 @@ export class NanoBanana2Adapter implements ModelAdapter {
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
     const imageInput = [
-      params.primaryImageDataUrl,
-      ...params.referenceImageDataUrls,
+      params.primaryImageUrl,
+      ...params.referenceImageUrls,
     ];
 
     return {

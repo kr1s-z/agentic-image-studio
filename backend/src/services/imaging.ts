@@ -2,17 +2,30 @@ import sharp from "sharp";
 import axios from "axios";
 import path from "path";
 import fs from "fs";
+import FormData from "form-data";
 import type { PlanStep } from "../types";
 import { modelRegistry } from "../models";
 import { isReplicateConfigured, resolveReplicateToken } from "../config/env";
 
 const UPLOADS_DIR = path.join(__dirname, "../../uploads");
+const MAX_RETRIES = 5;
+const RETRY_BASE_MS = 2_000;
 
 if (!fs.existsSync(UPLOADS_DIR))
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 function log(msg: string): void {
   console.log(`[imaging] ${msg}`);
+}
+
+function isRetryable(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  const status = err.response?.status;
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function retryDelay(attempt: number): number {
+  return RETRY_BASE_MS * Math.pow(2, attempt) + Math.random() * 1_000;
 }
 
 export function isReplicateAvailable(): boolean {
@@ -106,12 +119,47 @@ export async function applySharpOperation(
 /*  Replicate — delegates to model adapters via registry               */
 /* ------------------------------------------------------------------ */
 
-async function bufToDataUrl(buf: Buffer): Promise<string> {
-  const resized = await sharp(buf)
+async function prepareImage(buf: Buffer): Promise<Buffer> {
+  return sharp(buf)
     .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 85 })
     .toBuffer();
-  return `data:image/jpeg;base64,${resized.toString("base64")}`;
+}
+
+/**
+ * Upload a buffer to Replicate's files API and return a serving URL.
+ * This avoids base64 data-URI issues with models that expect real URLs.
+ */
+async function uploadToReplicate(buf: Buffer, token: string): Promise<string> {
+  const prepared = await prepareImage(buf);
+  const form = new FormData();
+  form.append("content", prepared, {
+    filename: "input.jpg",
+    contentType: "image/jpeg",
+  });
+
+  const { data } = await axios.post(
+    "https://api.replicate.com/v1/files",
+    form,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...form.getHeaders(),
+      },
+      timeout: 30_000,
+    },
+  );
+  return data.urls?.get ?? data.url;
+}
+
+function extractErrorDetail(err: unknown): string {
+  if (!axios.isAxiosError(err)) return String(err);
+  const status = err.response?.status;
+  const body = err.response?.data;
+  const detail = typeof body === "object" && body !== null
+    ? JSON.stringify(body).slice(0, 500)
+    : String(body ?? "");
+  return `HTTP ${status}: ${detail}`;
 }
 
 export async function replicateTransform(
@@ -129,55 +177,83 @@ export async function replicateTransform(
     );
   }
 
-  const primaryDataUrl = await bufToDataUrl(buf);
-  const refDataUrls = await Promise.all(referenceImages.map(bufToDataUrl));
+  log(`Uploading ${1 + referenceImages.length} image(s) to Replicate files API…`);
+  const primaryUrl = await uploadToReplicate(buf, token);
+  const refUrls = await Promise.all(
+    referenceImages.map((img) => uploadToReplicate(img, token)),
+  );
 
   const input = adapter.buildInput({
     prompt,
-    primaryImageDataUrl: primaryDataUrl,
-    referenceImageDataUrls: refDataUrls,
+    primaryImageUrl: primaryUrl,
+    referenceImageUrls: refUrls,
     strength,
   });
 
   log(`Calling Replicate model=${adapter.id} (${adapter.name}) — prompt: "${prompt.slice(0, 60)}…"`);
 
-  const { data: prediction } = await axios.post(
-    "https://api.replicate.com/v1/predictions",
-    { model: adapter.id, input },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Prefer: "wait",
-      },
-      timeout: 120_000,
-    },
-  );
+  let lastErr: unknown;
 
-  let result = prediction;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const wait = retryDelay(attempt - 1);
+      log(`Rate limited — retrying in ${Math.round(wait / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
 
-  if (result.status !== "succeeded") {
-    for (let i = 0; i < 60 && result.status !== "succeeded"; i++) {
-      if (result.status === "failed" || result.status === "canceled") {
-        throw new Error(`Replicate prediction ${result.status}`);
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-      const { data } = await axios.get(
-        `https://api.replicate.com/v1/predictions/${result.id}`,
-        { headers: { Authorization: `Bearer ${token}` } },
+    try {
+      const { data: prediction } = await axios.post(
+        `https://api.replicate.com/v1/models/${adapter.id}/predictions`,
+        { input },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Prefer: "wait",
+          },
+          timeout: 120_000,
+        },
       );
-      result = data;
+
+      let result = prediction;
+
+      while (
+        result.status !== "succeeded" &&
+        result.status !== "failed" &&
+        result.status !== "canceled"
+      ) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const { data } = await axios.get(
+          `https://api.replicate.com/v1/predictions/${result.id}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        result = data;
+      }
+
+      if (result.status !== "succeeded") {
+        throw new Error(`Replicate prediction ${result.status}: ${result.error || ""}`);
+      }
+
+      if (!result.output) throw new Error("Replicate prediction returned no output");
+      log(`Replicate prediction succeeded: id=${result.id} model=${adapter.id}`);
+
+      const imgUrl = adapter.extractOutputUrl(result.output);
+      log(`Replicate output URL received for model=${adapter.id}`);
+      const { data: imgData } = await axios.get(imgUrl, {
+        responseType: "arraybuffer",
+        timeout: 30_000,
+      });
+      return Buffer.from(imgData);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err)) {
+        log(`Replicate error: ${extractErrorDetail(err)}`);
+        throw err;
+      }
     }
   }
 
-  if (!result.output) throw new Error("Replicate prediction timed out");
-
-  const imgUrl = adapter.extractOutputUrl(result.output);
-  const { data: imgData } = await axios.get(imgUrl, {
-    responseType: "arraybuffer",
-    timeout: 30_000,
-  });
-  return Buffer.from(imgData);
+  throw lastErr;
 }
 
 /* ------------------------------------------------------------------ */
@@ -190,20 +266,14 @@ export async function executePlanStep(
   model: string,
   referenceImages: Buffer[] = [],
 ): Promise<Buffer> {
-  if (planStep.tool === "replicate" && isReplicateAvailable()) {
-    try {
-      return await replicateTransform(
-        buf,
-        (planStep.parameters.prompt as string) || planStep.description,
-        (planStep.parameters.strength as number) ?? 0.7,
-        model,
-        referenceImages,
-      );
-    } catch (err) {
-      log(
-        `Replicate failed for "${planStep.action}", falling back to sharp: ${err}`,
-      );
-    }
+  if (planStep.tool === "replicate") {
+    return replicateTransform(
+      buf,
+      (planStep.parameters.prompt as string) || planStep.description,
+      (planStep.parameters.strength as number) ?? 0.7,
+      model,
+      referenceImages,
+    );
   }
 
   return applySharpOperation(buf, planStep.parameters);

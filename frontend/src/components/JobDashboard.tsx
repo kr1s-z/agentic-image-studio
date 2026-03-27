@@ -269,6 +269,30 @@ export default function JobDashboard({
           </div>
 
           {/* Image preview */}
+          {originalImages.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500">Uploaded references</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {originalImages.map((url, idx) => (
+                  <div
+                    key={`${url}-${idx}`}
+                    className="relative rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900"
+                  >
+                    <img
+                      src={url}
+                      alt={`Uploaded image ${idx + 1}`}
+                      className="w-full aspect-square object-cover"
+                      loading="lazy"
+                    />
+                    <span className="absolute top-1 left-1 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-zinc-200">
+                      {idx === 0 ? "Primary" : `Ref ${idx}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <ImagePreview
             originalUrl={originalImage}
             currentUrl={currentImage}

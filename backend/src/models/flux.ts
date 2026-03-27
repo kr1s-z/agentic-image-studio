@@ -5,18 +5,22 @@ export class FluxProAdapter implements ModelAdapter {
   readonly name = "Flux 1.1 Pro";
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
-    return {
+    const input: Record<string, unknown> = {
       prompt: params.prompt,
-      image_prompt: params.primaryImageDataUrl,
       aspect_ratio: "1:1",
-      output_format: "jpg",
+      output_format: "webp",
       output_quality: 90,
+      safety_tolerance: 5,
     };
+    if (params.primaryImageUrl) {
+      input.image_prompt = params.primaryImageUrl;
+    }
+    return input;
   }
 
   extractOutputUrl(output: unknown): string {
-    if (Array.isArray(output)) return String(output[0]);
     if (typeof output === "string") return output;
+    if (Array.isArray(output)) return String(output[0]);
     if (output && typeof output === "object" && "url" in output)
       return String((output as Record<string, unknown>).url);
     return String(output);
@@ -31,7 +35,7 @@ export class FluxSchnellAdapter implements ModelAdapter {
     return {
       prompt: params.prompt,
       aspect_ratio: "1:1",
-      output_format: "jpg",
+      output_format: "webp",
       output_quality: 90,
       num_outputs: 1,
     };

@@ -9,7 +9,7 @@ class GenericFallback implements ModelAdapter {
 
   buildInput(params: ModelInputParams): Record<string, unknown> {
     return {
-      image: params.primaryImageDataUrl,
+      image: params.primaryImageUrl,
       prompt: params.prompt,
       strength: params.strength,
       prompt_strength: params.strength,

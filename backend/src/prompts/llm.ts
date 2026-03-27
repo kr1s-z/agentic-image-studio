@@ -35,11 +35,24 @@ export function visionUserText(
 
 /* ---- Planning ---- */
 
-export const PLANNER_SYSTEM_PROMPT = `You are an expert image editing planner. Based on vision analysis and the user's goal, create a transformation plan.
+export function plannerSystemPrompt(replicateAvailable: boolean, modelId: string): string {
+  const replicateSection = replicateAvailable
+    ? `TOOL "replicate" — AI image-to-image transformation via ${modelId}.
+  AVAILABLE and REQUIRED for semantic edits (add/remove/replace objects, change pose/action, wardrobe, scene, identity-preserving edits).
+  Parameters: { prompt: "detailed description of the desired output image", strength?: number(0.1-0.9, default 0.7) }
+  Use a precise edit prompt that explicitly describes WHAT must change and WHAT must stay unchanged.
+  Higher strength = more change from the original.
+  IMPORTANT: If the goal asks to modify content (e.g. "hold an apple", "change clothes", "replace background"), use replicate for the main step.`
+    : `TOOL "replicate" — NOT AVAILABLE in this session. Use "sharp" only.`;
 
-Available tools:
+  return `You are an expert image editing planner. Based on vision analysis and the user's goal, create a transformation plan.
 
-TOOL "sharp" — local image processing. Each step needs an "operation" field:
+Available tools (priority order):
+
+TOOL "replicate" — primary tool for user-requested visual modifications and semantic edits.
+Use this for object/action/scene/appearance/style changes that require generating or altering visual content semantically.
+
+TOOL "sharp" — secondary helper tool for technical pixel adjustments only. Each step needs an "operation" field:
   resize: { operation:"resize", width?:number, height?:number, fit?:"cover"|"contain"|"inside" }
   sharpen: { operation:"sharpen", sigma?:number(0.5-5) }
   blur: { operation:"blur", sigma?:number(0.5-10) }
@@ -57,8 +70,14 @@ TOOL "sharp" — local image processing. Each step needs an "operation" field:
   negate: { operation:"negate" }
   median: { operation:"median", size?:number(3-7) }
 
-TOOL "replicate" — AI image-to-image transformation (may not be available):
-  { prompt: "description for AI model", strength?: number(0.1-0.9) }
+${replicateSection}
+
+Strategy:
+- Prioritize GOAL FULFILLMENT over generic quality enhancement.
+- If the goal requires semantic changes, the plan must include at least one replicate step that performs that change.
+- Do not create plans that only improve brightness/contrast/sharpness unless the user goal is explicitly about enhancement/restoration.
+- Use "sharp" only as helper steps (optional pre/post), not as the main transformation for semantic edits.
+- A typical semantic-edit plan: optional 0-1 sharp prep step -> 1+ replicate edit steps -> optional 0-1 sharp finishing step.
 
 Return JSON:
 {
@@ -68,6 +87,7 @@ Return JSON:
   ]
 }
 Create 2-5 steps. Be specific with parameter values. Respond with valid JSON only.`;
+}
 
 export function plannerUserText(
   goal: string,
@@ -75,12 +95,17 @@ export function plannerUserText(
   maxIterations: number,
   analysisJson: string,
   feedbackSection: string,
+  modelId: string,
 ): string {
   return `Goal: "${goal}"
 Iteration: ${iteration} of ${maxIterations}
+Selected image model: ${modelId}
 Vision analysis: ${analysisJson}${feedbackSection}
 
-Create a plan. JSON only.`;
+Create a plan that directly satisfies the requested modification.
+If the goal describes a content change (object/action/scene/appearance), include a replicate step that performs that exact change.
+Avoid generic "enhance image" plans unless the goal explicitly asks for enhancement.
+JSON only.`;
 }
 
 /* ---- Critic ---- */

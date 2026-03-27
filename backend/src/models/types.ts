@@ -1,7 +1,7 @@
 export interface ModelInputParams {
   prompt: string;
-  primaryImageDataUrl: string;
-  referenceImageDataUrls: string[];
+  primaryImageUrl: string;
+  referenceImageUrls: string[];
   strength: number;
 }
 
