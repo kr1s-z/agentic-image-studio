@@ -5,6 +5,7 @@ import {
   type LangfuseGenerationClient,
 } from "langfuse";
 import crypto from "crypto";
+import axios from "axios";
 
 type SpanHandle = {
   end: (output?: unknown) => void;
@@ -29,7 +30,51 @@ function log(msg: string): void {
 }
 
 function safeError(error: unknown): string {
+  if (
+    error &&
+    typeof error === "object" &&
+    "status" in (error as any) &&
+    "statusText" in (error as any)
+  ) {
+    const e = error as any;
+    const method = typeof e.method === "string" ? e.method : "";
+    const url = typeof e.url === "string" ? e.url : "";
+    const extra = [method, url].filter(Boolean).join(" ");
+    return `HTTP ${e.status}${e.statusText ? ` ${e.statusText}` : ""}${extra ? ` (${extra})` : ""}`;
+  }
+  if (
+    error &&
+    typeof error === "object" &&
+    "response" in (error as any) &&
+    (error as any).response
+  ) {
+    const r = (error as any).response;
+    const status = r?.status;
+    const statusText = r?.statusText;
+    const data = r?.data;
+    const detail =
+      typeof data === "string" ? data : data ? JSON.stringify(data) : "";
+    return `HTTP ${status ?? "unknown"}${statusText ? ` ${statusText}` : ""}${detail ? `: ${detail}` : ""}`;
+  }
   return error instanceof Error ? error.message : String(error);
+}
+
+async function describeResponse(res: Response): Promise<string> {
+  let body = "";
+  try {
+    body = (await res.text()).trim();
+  } catch {
+    body = "";
+  }
+  if (body.length > 600) body = `${body.slice(0, 600)}…`;
+  return `HTTP ${res.status} ${res.statusText}${res.url ? ` (${res.url})` : ""}${body ? `: ${body}` : ""}`;
+}
+
+async function describeError(error: unknown): Promise<string> {
+  if (error instanceof Response) {
+    return describeResponse(error);
+  }
+  return safeError(error);
 }
 
 function getClient(): Langfuse | null {
@@ -79,30 +124,76 @@ async function uploadTraceImage(args: {
 
   const contentType = args.contentType || "image/jpeg";
   const startedAt = Date.now();
-  const sha256Hash = crypto.createHash("sha256").update(args.buffer).digest("hex");
+  // Langfuse API expects standard base64-encoded SHA-256 (44 chars).
+  const sha256Hash = crypto
+    .createHash("sha256")
+    .update(args.buffer)
+    .digest("base64")
+    .replace(/\s+/g, "");
 
-  const { mediaId, uploadUrl } = await lf.api.mediaGetUploadUrl({
-    traceId: args.jobId,
-    field: args.field,
-    contentType: contentType as any,
-    contentLength: args.buffer.length,
-    sha256Hash,
-  });
+  let mediaId: string;
+  let uploadUrl: string | null | undefined;
+  try {
+    const res = await lf.api.mediaGetUploadUrl({
+      traceId: args.jobId,
+      field: args.field,
+      contentType: contentType as any,
+      contentLength: args.buffer.length,
+      sha256Hash,
+    });
+    mediaId = res.mediaId;
+    uploadUrl = res.uploadUrl;
+  } catch (err) {
+    const msg = await describeError(err);
+    throw new Error(
+      `Langfuse mediaGetUploadUrl failed: ${msg} (sha256Hash.length=${sha256Hash.length})`,
+    );
+  }
 
   if (uploadUrl) {
-    const uploadRes = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": contentType },
-      body: args.buffer,
-    });
-    await lf.api.mediaPatch(mediaId, {
-      uploadedAt: new Date().toISOString(),
-      uploadHttpStatus: uploadRes.status,
-      uploadHttpError: uploadRes.ok ? undefined : uploadRes.statusText,
-      uploadTimeMs: Date.now() - startedAt,
-    });
-    if (!uploadRes.ok) {
-      throw new Error(`Langfuse media upload failed (${uploadRes.status}): ${uploadRes.statusText}`);
+    let uploadStatus = 0;
+    let uploadStatusText = "";
+    let uploadError = "";
+    try {
+      // Signed S3 URLs may require exact headers that are part of SignedHeaders.
+      // Explicitly set checksum + length to avoid SignatureDoesNotMatch.
+      const uploadRes = await axios.put(uploadUrl, args.buffer, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(args.buffer.length),
+          "x-amz-checksum-sha256": sha256Hash,
+        },
+        timeout: 60_000,
+        maxBodyLength: Infinity,
+        validateStatus: () => true,
+      });
+      uploadStatus = uploadRes.status;
+      uploadStatusText = uploadRes.statusText || "";
+      if (uploadStatus < 200 || uploadStatus >= 300) {
+        const body =
+          typeof uploadRes.data === "string"
+            ? uploadRes.data
+            : JSON.stringify(uploadRes.data ?? "");
+        uploadError = body.slice(0, 600);
+      }
+    } catch (err) {
+      uploadError = safeError(err);
+    }
+    try {
+      await lf.api.mediaPatch(mediaId, {
+        uploadedAt: new Date().toISOString(),
+        uploadHttpStatus: uploadStatus,
+        uploadHttpError: uploadError || (uploadStatus >= 200 && uploadStatus < 300 ? undefined : uploadStatusText),
+        uploadTimeMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      const msg = await describeError(err);
+      throw new Error(`Langfuse mediaPatch failed: ${msg}`);
+    }
+    if (uploadStatus < 200 || uploadStatus >= 300) {
+      throw new Error(
+        `Langfuse media upload failed: HTTP ${uploadStatus}${uploadStatusText ? ` ${uploadStatusText}` : ""}${uploadError ? `: ${uploadError}` : ""}`,
+      );
     }
   }
 
@@ -150,8 +241,9 @@ export function attachOriginalImageToTrace(
     contentType,
     buffer,
     label: `original_${index}`,
-  }).catch((err) => {
-    log(`Failed to upload original image ${index} to Langfuse: ${safeError(err)}`);
+  }).catch(async (err) => {
+    const msg = await describeError(err);
+    log(`Failed to upload original image ${index} to Langfuse: ${msg}`);
   });
 }
 
@@ -166,8 +258,9 @@ export function attachFinalImageToTrace(
     contentType,
     buffer,
     label: "final",
-  }).catch((err) => {
-    log(`Failed to upload final image to Langfuse: ${safeError(err)}`);
+  }).catch(async (err) => {
+    const msg = await describeError(err);
+    log(`Failed to upload final image to Langfuse: ${msg}`);
   });
 }
 
